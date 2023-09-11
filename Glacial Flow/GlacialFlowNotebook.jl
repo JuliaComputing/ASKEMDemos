@@ -36,16 +36,36 @@ begin
 	using Statistics
 	using CairoMakie
 	using GeometryBasics: Point2, Point3
+	Point2D = Point2{Float64}
+	Point3D = Point3{Float64}
 end
 
-# ╔═╡ c1bc4f3c-2c17-4b80-a580-9ca71484decb
-CairoMakie.activate!(type = "png")
+# ╔═╡ 602d79b6-37d8-45f7-89ea-d647ba1bc98a
+md"""
+# Halfar's model of glacial flow
 
-# ╔═╡ 73e9af9a-2a27-4de6-a3fb-edc693fe1525
-Point2D = Point2{Float64}
+Let's model glacial flow using a model of how ice height of a glacial sheet changes over time, from P. Halfar's 1981 paper: "On the dynamics of the ice sheets".
+"""
 
-# ╔═╡ f35176a5-7277-4d25-81b4-d03849fe4095
-Point3D = Point3{Float64}
+# ╔═╡ 26d4d052-c4c3-42ea-a872-c77d2a5de482
+md"""
+# Defining the models
+
+The first step is to find a suitable equation for our model, and translate it into the Discrete Exterior Calculus. The Exterior Calculus is a generalization of vector calculus, so for low-dimensional spaces, this translation is straightforward. For example, divergence is typically written as (⋆, d, ⋆). Scalar fields are typically interpreted as "0Forms", i.e. values assigned to vertices of a mesh.
+
+We use the `@decapode` macro to interpret the equations. Here, we have equation 2 from Halfar:
+```math
+\frac{\partial h}{\partial t} = \frac{2}{n + 2} (\frac{\rho g}{A})^n \frac{\partial}{\partial x}(\frac{\partial h}{\partial x} |\frac{\partial h}{\partial x}| ^{n-1} h^{n+2}).
+```
+We'll change the term out front to Γ so we can demonstrate composition in a moment.
+
+In the exterior calculus, we could write the above equations like so:
+```math
+\partial_t(h) = \circ(\star, d, \star)(\Gamma\quad d(h)\quad \text{avg}_{01}|d(h)^\sharp|^{n-1} \quad \text{avg}_{01}(h^{n+2})).
+```
+`avg` here is an operator that performs the midpoint rule, setting the value at an edge to be the average of the values at its two vertices.
+
+"""
 
 # ╔═╡ 31defba0-6f02-41c7-8a04-c7d27e5af999
 halfar_eq2 = @decapode begin
@@ -60,6 +80,11 @@ end
 # ╔═╡ 2d91fe2e-cfa6-4ca7-aab6-805a1c651cd1
 to_graphviz(halfar_eq2)
 
+# ╔═╡ 58a6c091-0645-42a5-bcfb-353c4ebdc2d2
+md"""
+And here, a formulation of Glen's law from J.W. Glen's 1958 "The flow law of ice".
+"""
+
 # ╔═╡ 3d79a6b3-5453-4e4f-b818-045f0b2619b2
 glens_law = @decapode begin
   #Γ::Form0
@@ -73,11 +98,21 @@ end
 # ╔═╡ e310b5d3-539a-468f-ac4c-6cb2a99b8d80
 to_graphviz(glens_law)
 
+# ╔═╡ 946876c1-a4d0-4bf3-8684-ba9f959d04af
+md"""
+# Composing models
+
+We can use operadic composition to specify how our models come together. In this example, we have two Decapodes, and two quantities that are shared between them.
+"""
+
 # ╔═╡ 463b7b72-fb76-4423-84c9-02a82459b888
 ice_dynamics_composition_diagram = @relation () begin
   dynamics(Γ,n)
   stress(Γ,n)
 end
+
+# ╔═╡ 38f9df87-1bb2-4177-800c-46797693aa58
+
 
 # ╔═╡ 7632a0b0-2a9a-49bc-84b3-173f900bceb5
 ice_dynamics_cospan = oapply(ice_dynamics_composition_diagram,
@@ -89,6 +124,13 @@ ice_dynamics = apex(ice_dynamics_cospan)
 
 # ╔═╡ d83322f6-38cd-42a7-a12d-a1ea8fd0e77f
 to_graphviz(ice_dynamics)
+
+# ╔═╡ 2965fc9c-a38d-40e4-b266-be09234240bd
+md"""
+# Provide a semantics
+
+To interpret our composed Decapode, we need to specify what Discrete Exterior Calculus to interpret our quantities in. Let's choose the 1D Discrete Exterior Calculus:
+"""
 
 # ╔═╡ c5cb0cb3-53de-4809-9ff4-c16a554ea24b
 ice_dynamics1D = expand_operators(ice_dynamics)
@@ -102,17 +144,102 @@ resolve_overloads!(ice_dynamics1D, op1_res_rules_1D, op2_res_rules_1D)
 # ╔═╡ fb843b7b-9a54-4989-93e2-3bcc4adaa440
 to_graphviz(ice_dynamics1D)
 
+# ╔═╡ 48b30692-cbea-4cfb-9dc1-bd39c45d6cd1
+md"""# Define a mesh
+
+We'll need a mesh to simulate on. Since this is a 1D mesh, we can go ahead and make one right now:
+"""
+
+# ╔═╡ 0bf9ec89-57e6-48c8-abb3-d90308535430
+md"""
+# Define input data
+
+We need initial conditions to use for our simulation.
+"""
+
+# ╔═╡ 63114721-e13d-46ce-afff-68eb471c18ed
+sim = eval(gensim(ice_dynamics1D, dimension=1))
+
+# ╔═╡ 80bcb875-9502-4b60-9702-d5d05c1bf1fe
+n = 3
+
+# ╔═╡ a2175267-466e-443d-b059-020f08f7c3d0
+ρ = 910
+
+# ╔═╡ 656431c4-1859-4adf-9eea-fa1c36b4f19b
+g = 9.8
+
+# ╔═╡ f2da97f4-024d-4325-b834-430ea7214229
+A = 1e-16
+
+# ╔═╡ b4f58224-1a15-400a-a083-de500e8fb0d7
+constants_and_parameters = (
+  n = n,
+  stress_ρ = ρ,
+  stress_g = g,
+  stress_A = A)
+
+# ╔═╡ 49ee38ae-c171-4b67-8118-eae40f3cff58
+@bind iceheight PlutoUI.Slider(1:20)
+
+# ╔═╡ 6b11d89d-12f1-45dd-b07e-31ade890ea02
+@bind rightendpoint PlutoUI.Slider(10_000:100_000)
+
+# ╔═╡ 9a704aed-c935-46ad-9d99-e3d2a9c57a23
+begin
+
+function iceheightic(u,p)
+	a,b,c = u
+	left, middle, right, height = p
+	quad1 = a*left^2 + b*left + c
+	quad2 = a*middle^2 + b*middle + c - height
+	quad3 = a*right^2 + b*right + c
+
+	[quad1, quad2, quad3]
+end 
+
+u0 = [-1,1,0]
+
+p = [0, rightendpoint/2, rightendpoint,iceheight]
+
+probic = NonlinearProblem(iceheightic,u0,p)
+
+solic = solve(probic,NewtonRaphson())
+
+end
+
+# ╔═╡ cad15749-a1c7-4406-b84b-997f8f70db34
+@bind meshnumber PlutoUI.Slider(10:100)
+
 # ╔═╡ f6ee3645-acda-47c8-aea9-f05b9fdac9af
 begin
 # This is a 1D mesh, consisting of edges and vertices.
 s′ = EmbeddedDeltaSet1D{Bool, Point2D}()
 # 20 hundred vertices along a line, connected by edges.
-add_vertices!(s′, 20, point=Point2D.(range(0, 10_000, length=20), 0))
+add_vertices!(s′, meshnumber, point=Point2D.(range(0, rightendpoint, length=meshnumber), 0))
 add_edges!(s′, 1:nv(s′)-1, 2:nv(s′))
 orient!(s′)
 s = EmbeddedDeltaDualComplex1D{Bool, Float64, Point2D}(s′)
 subdivide_duals!(s, Circumcenter())
 end
+
+# ╔═╡ 5d90866f-eaf3-4207-8b13-5f835c8fecbe
+begin
+# Ice height is a primal 0-form, with values at vertices.
+# We choose a distribution that obeys the shallow height and shallow slope conditions.
+h₀ = map(point(s′)) do (x,_)
+  solic[1]*x^2 + solic[2]*x
+end
+
+# Visualize initial conditions for ice sheet height.
+lines(map(x -> x[1], point(s′)), h₀, linewidth=5)
+end
+
+# ╔═╡ 77e3f257-b699-4367-9d3d-d9285c7ce4df
+h₀
+
+# ╔═╡ 7607332c-1810-4e91-a240-17d88eab90cd
+u₀ = construct(PhysicsState, [VectorForm(h₀)], Float64[], [:dynamics_h])
 
 # ╔═╡ b6584474-db80-4a63-9860-332a185d0aa2
 map(x -> x[1], point(s′))
@@ -167,74 +294,8 @@ end
 	
 end
 
-# ╔═╡ 63114721-e13d-46ce-afff-68eb471c18ed
-sim = eval(gensim(ice_dynamics1D, dimension=1))
-
 # ╔═╡ 6adbc06b-ff48-4553-b951-5cf79d85f59d
 fₘ = sim(s, generate)
-
-# ╔═╡ 80bcb875-9502-4b60-9702-d5d05c1bf1fe
-n = 3
-
-# ╔═╡ a2175267-466e-443d-b059-020f08f7c3d0
-ρ = 910
-
-# ╔═╡ 656431c4-1859-4adf-9eea-fa1c36b4f19b
-g = 9.8
-
-# ╔═╡ f2da97f4-024d-4325-b834-430ea7214229
-A = 1e-16
-
-# ╔═╡ b4f58224-1a15-400a-a083-de500e8fb0d7
-constants_and_parameters = (
-  n = n,
-  stress_ρ = ρ,
-  stress_g = g,
-  stress_A = A)
-
-# ╔═╡ 49ee38ae-c171-4b67-8118-eae40f3cff58
-@bind height PlutoUI.Slider(1:20)
-
-# ╔═╡ 9a704aed-c935-46ad-9d99-e3d2a9c57a23
-begin
-
-function iceheightic(u,p)
-	a,b,c = u
-	left, middle, right, height = p
-	quad1 = a*left^2 + b*left + c
-	quad2 = a*middle^2 + b*middle + c - height
-	quad3 = a*right^2 + b*right + c
-
-	[quad1, quad2, quad3]
-end 
-
-u0 = [-1,1,0]
-
-p = [0, 10_000/2, 10_000,height]
-
-probic = NonlinearProblem(iceheightic,u0,p)
-
-solic = solve(probic,NewtonRaphson())
-
-end
-
-# ╔═╡ 5d90866f-eaf3-4207-8b13-5f835c8fecbe
-begin
-# Ice height is a primal 0-form, with values at vertices.
-# We choose a distribution that obeys the shallow height and shallow slope conditions.
-h₀ = map(point(s′)) do (x,_)
-  solic[1]*x^2 + solic[2]*x
-end
-
-# Visualize initial conditions for ice sheet height.
-lines(map(x -> x[1], point(s′)), h₀, linewidth=5)
-end
-
-# ╔═╡ 77e3f257-b699-4367-9d3d-d9285c7ce4df
-h₀
-
-# ╔═╡ 7607332c-1810-4e91-a240-17d88eab90cd
-u₀ = construct(PhysicsState, [VectorForm(h₀)], Float64[], [:dynamics_h])
 
 # ╔═╡ 8206dfc2-3eab-4b23-9875-3e7b016633b5
 begin
@@ -255,7 +316,7 @@ end
 # ╔═╡ a823be96-b877-4774-8c87-688419988e6c
 # Create a gif
 begin
-  frames = 100
+  frames = 20
   fig, ax, ob = lines(map(x -> x[1], point(s′)), findnode(soln(0), :dynamics_h))
   ylims!(ax, extrema(h₀))
   record(fig, "ice_dynamics1D.gif", range(0.0, tₑ; length=frames); framerate = 15) do t
@@ -2622,23 +2683,28 @@ version = "3.5.0+0"
 
 # ╔═╡ Cell order:
 # ╠═50e45393-6fb1-4a25-93fd-40566f155e1e
+# ╠═602d79b6-37d8-45f7-89ea-d647ba1bc98a
 # ╠═6a6b143a-4349-11ee-3b55-c95f2e4cc243
-# ╠═c1bc4f3c-2c17-4b80-a580-9ca71484decb
-# ╠═73e9af9a-2a27-4de6-a3fb-edc693fe1525
-# ╠═f35176a5-7277-4d25-81b4-d03849fe4095
+# ╠═26d4d052-c4c3-42ea-a872-c77d2a5de482
 # ╠═31defba0-6f02-41c7-8a04-c7d27e5af999
 # ╠═2d91fe2e-cfa6-4ca7-aab6-805a1c651cd1
+# ╠═58a6c091-0645-42a5-bcfb-353c4ebdc2d2
 # ╠═3d79a6b3-5453-4e4f-b818-045f0b2619b2
 # ╠═e310b5d3-539a-468f-ac4c-6cb2a99b8d80
+# ╠═946876c1-a4d0-4bf3-8684-ba9f959d04af
 # ╠═463b7b72-fb76-4423-84c9-02a82459b888
+# ╠═38f9df87-1bb2-4177-800c-46797693aa58
 # ╠═7632a0b0-2a9a-49bc-84b3-173f900bceb5
 # ╠═ae92b9b0-2088-4f9b-a7d9-6b89598711c7
 # ╠═d83322f6-38cd-42a7-a12d-a1ea8fd0e77f
+# ╠═2965fc9c-a38d-40e4-b266-be09234240bd
 # ╠═c5cb0cb3-53de-4809-9ff4-c16a554ea24b
 # ╠═84654744-5730-496e-b68a-211804c784f6
 # ╠═dfbccca6-04e8-4d32-ab0c-c9acc3a50665
 # ╠═fb843b7b-9a54-4989-93e2-3bcc4adaa440
+# ╠═48b30692-cbea-4cfb-9dc1-bd39c45d6cd1
 # ╠═f6ee3645-acda-47c8-aea9-f05b9fdac9af
+# ╠═0bf9ec89-57e6-48c8-abb3-d90308535430
 # ╠═9a704aed-c935-46ad-9d99-e3d2a9c57a23
 # ╠═5d90866f-eaf3-4207-8b13-5f835c8fecbe
 # ╠═77e3f257-b699-4367-9d3d-d9285c7ce4df
@@ -2655,6 +2721,8 @@ version = "3.5.0+0"
 # ╠═656431c4-1859-4adf-9eea-fa1c36b4f19b
 # ╠═f2da97f4-024d-4325-b834-430ea7214229
 # ╠═49ee38ae-c171-4b67-8118-eae40f3cff58
+# ╠═6b11d89d-12f1-45dd-b07e-31ade890ea02
+# ╠═cad15749-a1c7-4406-b84b-997f8f70db34
 # ╠═a823be96-b877-4774-8c87-688419988e6c
 # ╠═16e9055f-e77e-4ba5-85ea-b848989446d5
 # ╟─00000000-0000-0000-0000-000000000001
