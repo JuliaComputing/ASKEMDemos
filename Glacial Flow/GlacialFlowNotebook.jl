@@ -112,7 +112,9 @@ ice_dynamics_composition_diagram = @relation () begin
 end
 
 # ╔═╡ 38f9df87-1bb2-4177-800c-46797693aa58
-
+md"""
+To a apply a composition, we specify which Decapodes to plug into those boxes, and what each calls the corresponding shared variables internally.
+"""
 
 # ╔═╡ 7632a0b0-2a9a-49bc-84b3-173f900bceb5
 ice_dynamics_cospan = oapply(ice_dynamics_composition_diagram,
@@ -326,6 +328,282 @@ end
 
 # ╔═╡ 16e9055f-e77e-4ba5-85ea-b848989446d5
 fig
+
+# ╔═╡ e0a20d95-7c68-4585-a20a-851abe21d9d8
+md"""
+# 2D Mesh
+"""
+
+# ╔═╡ 94b34a51-b4bd-499e-9cf2-a237740c7d14
+function triangulated_grid(max_x, max_y, dx, dy, point_type)
+
+  s = EmbeddedDeltaSet2D{Bool, point_type}()
+
+  # Place equally-spaced points in a max_x by max_y rectangle.
+  coords = point_type == Point3D ? map(x -> point_type(x..., 0), Iterators.product(0:dx:max_x, 0:dy:max_y)) : map(x -> point_type(x...), Iterators.product(0:dx:max_x, 0:dy:max_y))
+  # Perturb every other row right by half a dx.
+  coords[:, 2:2:end] = map(coords[:, 2:2:end]) do row
+    if point_type == Point3D
+      row .+ [dx/2, 0, 0]
+    else
+      row .+ [dx/2, 0]
+    end
+  end
+  # The perturbation moved the right-most points past max_x, so compress along x.
+  map!(coords, coords) do coord
+    if point_type == Point3D
+      diagm([max_x/(max_x+dx/2), 1, 1]) * coord
+    else
+      diagm([max_x/(max_x+dx/2), 1]) * coord
+    end
+  end
+
+  add_vertices!(s, length(coords), point = vec(coords))
+
+  nx = length(0:dx:max_x)
+
+  # Matrix that stores indices of points.
+  idcs = reshape(eachindex(coords), size(coords))
+  # Only grab vertices that will be the bottom-left corner of a subdivided square.
+  idcs = idcs[begin:end-1, begin:end-1]
+  
+  # Subdivide every other row along the opposite diagonal.
+  for i in idcs[:, begin+1:2:end]
+    glue_sorted_triangle!(s, i, i+nx, i+nx+1)
+    glue_sorted_triangle!(s, i, i+1, i+nx+1)
+  end
+  for i in idcs[:, begin:2:end]
+    glue_sorted_triangle!(s, i, i+1, i+nx)
+    glue_sorted_triangle!(s, i+1, i+nx, i+nx+1)
+  end
+
+  # Orient and return.
+  s[:edge_orientation]=true
+  orient!(s)
+  s
+end
+
+# ╔═╡ 40852a15-b394-40bf-8390-dd635718f703
+begin
+	ice_dynamics2D = expand_operators(ice_dynamics)
+	infer_types!(ice_dynamics2D)
+	resolve_overloads!(ice_dynamics2D)
+	to_graphviz(ice_dynamics2D)
+end
+
+# ╔═╡ 9238ae38-6bcd-4a74-973e-900767935493
+begin
+TwoDs′ = triangulated_grid(10_000,10_000,800,800,Point3D)
+TwoDs = EmbeddedDeltaDualComplex2D{Bool, Float64, Point3D}(TwoDs′)
+subdivide_duals!(TwoDs, Barycenter())
+wireframe(TwoDs)
+
+end
+
+# ╔═╡ 566cca74-899c-4368-be7e-399ab56d94d6
+md"""
+# Define our input data
+"""
+
+# ╔═╡ 47a3ff13-2f34-4b40-9f6b-196e2743771f
+# Ice height is a primal 0-form, with values at vertices.
+TwoDh₀ = map(point(TwoDs′)) do (x,y)
+  (7072-((x-5000)^2 + (y-5000)^2)^(1/2))/9e3+10
+end
+
+# ╔═╡ 58f3b55b-67ae-421b-9d4c-39b1ab976f04
+TwoDu₀ = construct(PhysicsState, [VectorForm(TwoDh₀)], Float64[], [:dynamics_h])
+
+# ╔═╡ db3a3362-a5a5-439e-b32a-5e7133c63d0c
+TwoDconstants_and_parameters = (
+  n = n,
+  stress_ρ = ρ,
+  stress_g = g,
+  stress_A = A)
+
+# ╔═╡ d213abd6-38c3-448a-943f-f1c3e3c32451
+md"""
+# Define our functions
+"""
+
+# ╔═╡ ac9b2bb9-6e00-4db1-b17d-9edc8d928bce
+function TwoDgenerate(sd, my_symbol; hodge=GeometricHodge())
+  op = @match my_symbol begin
+    :♯ => x -> begin
+      ♯(sd, EForm(x))
+    end
+    :mag => x -> begin
+      norm.(x)
+    end
+    :avg₀₁ => x -> begin
+      I = Vector{Int64}()
+      J = Vector{Int64}()
+      V = Vector{Float64}()
+      for e in 1:ne(TwoDs)
+          append!(J, [TwoDs[e,:∂v0],TwoDs[e,:∂v1]])
+          append!(I, [e,e])
+          append!(V, [0.5, 0.5])
+      end
+      avg_mat = sparse(I,J,V)
+      avg_mat * x
+    end
+    :^ => (x,y) -> x .^ y
+    :* => (x,y) -> x .* y
+    :show => x -> begin
+      @show x
+      @show length(x)
+      x
+    end
+    x => error("Unmatched operator $my_symbol")
+  end
+  return (args...) -> op(args...)
+end
+
+# ╔═╡ 349d7d75-e2f5-4624-a997-9fc521b349db
+md"""
+# Generate simulation
+"""
+
+# ╔═╡ 64a4a6c9-7abf-4d63-b537-c8218db9fecf
+TwoDsim = eval(gensim(ice_dynamics2D, dimension=2))
+
+# ╔═╡ 7ae1b273-85e5-4d2d-bd23-e82b817c4fa5
+TwoDfₘ = TwoDsim(TwoDs, TwoDgenerate)
+
+# ╔═╡ 8caa666d-a490-4a9e-8290-316042a5146b
+md"""
+# Run Simulations
+"""
+
+# ╔═╡ 6d5d58e8-093d-4634-9f79-7ce69b8adea3
+begin
+	TwoDtₑ = 5e13
+	
+	@info("Solving")
+	TwoDprob = ODEProblem(TwoDfₘ, TwoDu₀, (0, TwoDtₑ), TwoDconstants_and_parameters)
+	TwoDsoln = solve(TwoDprob, Tsit5())
+	@show TwoDsoln.retcode
+	@info("Done")
+end
+
+# ╔═╡ c909634f-ffa7-4aca-8ffc-c585256904cd
+
+
+# ╔═╡ 6bb2a147-c5ad-4663-a55e-b14e445087e0
+md"""
+### Initial Ice Height
+"""
+
+# ╔═╡ e98abef5-c1bf-4602-b770-feb4a3b0e69a
+# Visualize initial condition for ice sheet height.
+mesh(TwoDs′, color=TwoDh₀, colormap=:jet)
+
+# ╔═╡ c7617035-c6de-4e36-9e3d-06943629cd04
+md"""
+### Ice height at $5*10^{13}$ seconds / 1,584,438 years 
+"""
+
+# ╔═╡ e75733ed-8245-4304-8622-7f888c568a98
+mesh(TwoDs′, color=findnode(TwoDsoln(TwoDtₑ), :dynamics_h), colormap=:jet, colorrange=extrema(findnode(TwoDsoln(0), :dynamics_h)))
+
+# ╔═╡ 238b1eae-e4b8-484b-8650-b38cf91c25a3
+md"""
+# Sphere Mesh
+"""
+
+# ╔═╡ 9af4fac9-3d77-4e7b-9880-c0eec8f767ae
+md"""
+# 2-Manifold in 3D
+
+We note that just because our physics is happening on a 2-manifold, (a surface), this doesn't restrict us to the 2D plane. In fact, we can "embed" our 2-manifold in 3D space to simulate a glacial sheets spread across the globe.
+
+
+"""
+
+# ╔═╡ 294c982e-cd42-497d-9253-d777ae39fafc
+begin
+	Spheres′ = loadmesh(Icosphere(3, 10_000))
+	Spheres = EmbeddedDeltaDualComplex2D{Bool, Float64, Point3D}(Spheres′)
+	subdivide_duals!(Spheres, Barycenter())
+	wireframe(Spheres)
+end
+
+# ╔═╡ 138adaf5-bc4c-4a3f-9704-64ae9105af08
+sphereh₀ = map(point(Spheres′)) do (x,y,z)
+  (z*z)/(10_000*10_000)
+end
+
+# ╔═╡ 2097d7a9-8712-4d0f-a01c-d2d64e9aa4c2
+function Spheregenerate(sd, my_symbol; hodge=GeometricHodge())
+  op = @match my_symbol begin
+    :♯ => x -> begin
+      ♯(sd, EForm(x))
+    end
+    :mag => x -> begin
+      norm.(x)
+    end
+    :avg₀₁ => x -> begin
+      I = Vector{Int64}()
+      J = Vector{Int64}()
+      V = Vector{Float64}()
+      for e in 1:ne(Spheres)
+          append!(J, [Spheres[e,:∂v0],Spheres[e,:∂v1]])
+          append!(I, [e,e])
+          append!(V, [0.5, 0.5])
+      end
+      avg_mat = sparse(I,J,V)
+      avg_mat * x
+    end
+    :^ => (x,y) -> x .^ y
+    :* => (x,y) -> x .* y
+    :show => x -> begin
+      @show x
+      @show length(x)
+      x
+    end
+    x => error("Unmatched operator $my_symbol")
+  end
+  return (args...) -> op(args...)
+end
+
+# ╔═╡ dc096da6-9f18-4e0b-aacc-ff2b72fdd255
+sphereu₀ = construct(PhysicsState, [VectorForm(sphereh₀)], Float64[], [:dynamics_h])
+
+# ╔═╡ 3f8f2205-e93d-471e-9f06-0b1aa65100d9
+spheresim = eval(gensim(ice_dynamics2D, dimension=2))
+
+# ╔═╡ de75bff5-896d-4d0d-be76-eaceb221aedb
+spherefₘ = spheresim(Spheres, Spheregenerate)
+
+# ╔═╡ d1235075-2e8d-439e-b84f-c98a641fa98b
+begin
+	spheretₑ = 5e25
+	
+	@info("Solving")
+	sphereprob = ODEProblem(spherefₘ, sphereu₀, (0, spheretₑ), TwoDconstants_and_parameters)
+	spheresoln = solve(sphereprob, Tsit5())
+	@show spheresoln.retcode
+	@info("Done")
+end
+
+# ╔═╡ 47154a6e-75c0-401b-a541-6d60bc605aed
+extrema(findnode(spheresoln(0), :dynamics_h)), extrema(findnode(spheresoln(spheretₑ), :dynamics_h))
+
+# ╔═╡ 89cade4a-e9f6-4767-8dec-7d0fd8c9ebbf
+md"""
+### Initial ice height
+"""
+
+# ╔═╡ 3e34d4b1-45e8-4b7b-ab2f-ec2bbeacefba
+mesh(Spheres′, color=sphereh₀, colormap=:jet)
+
+# ╔═╡ f65afa49-6807-4ec3-ad1a-00d9db1140ea
+md"""
+### Ice height after $1.6 * 10^{18}$ years
+"""
+
+# ╔═╡ f131c5ff-4c13-4ef4-bb68-02d6044127df
+mesh(Spheres′, color=findnode(spheresoln(spheretₑ), :dynamics_h), colormap=:jet, colorrange=extrema(findnode(spheresoln(0), :dynamics_h)))
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -2720,10 +2998,44 @@ version = "3.5.0+0"
 # ╠═a2175267-466e-443d-b059-020f08f7c3d0
 # ╠═656431c4-1859-4adf-9eea-fa1c36b4f19b
 # ╠═f2da97f4-024d-4325-b834-430ea7214229
+# ╠═16e9055f-e77e-4ba5-85ea-b848989446d5
 # ╠═49ee38ae-c171-4b67-8118-eae40f3cff58
 # ╠═6b11d89d-12f1-45dd-b07e-31ade890ea02
 # ╠═cad15749-a1c7-4406-b84b-997f8f70db34
 # ╠═a823be96-b877-4774-8c87-688419988e6c
-# ╠═16e9055f-e77e-4ba5-85ea-b848989446d5
+# ╠═e0a20d95-7c68-4585-a20a-851abe21d9d8
+# ╠═94b34a51-b4bd-499e-9cf2-a237740c7d14
+# ╠═40852a15-b394-40bf-8390-dd635718f703
+# ╠═9238ae38-6bcd-4a74-973e-900767935493
+# ╠═566cca74-899c-4368-be7e-399ab56d94d6
+# ╠═47a3ff13-2f34-4b40-9f6b-196e2743771f
+# ╠═58f3b55b-67ae-421b-9d4c-39b1ab976f04
+# ╠═db3a3362-a5a5-439e-b32a-5e7133c63d0c
+# ╠═d213abd6-38c3-448a-943f-f1c3e3c32451
+# ╠═ac9b2bb9-6e00-4db1-b17d-9edc8d928bce
+# ╠═349d7d75-e2f5-4624-a997-9fc521b349db
+# ╠═64a4a6c9-7abf-4d63-b537-c8218db9fecf
+# ╠═7ae1b273-85e5-4d2d-bd23-e82b817c4fa5
+# ╠═8caa666d-a490-4a9e-8290-316042a5146b
+# ╠═6d5d58e8-093d-4634-9f79-7ce69b8adea3
+# ╠═c909634f-ffa7-4aca-8ffc-c585256904cd
+# ╠═6bb2a147-c5ad-4663-a55e-b14e445087e0
+# ╠═e98abef5-c1bf-4602-b770-feb4a3b0e69a
+# ╠═c7617035-c6de-4e36-9e3d-06943629cd04
+# ╠═e75733ed-8245-4304-8622-7f888c568a98
+# ╠═238b1eae-e4b8-484b-8650-b38cf91c25a3
+# ╠═9af4fac9-3d77-4e7b-9880-c0eec8f767ae
+# ╠═294c982e-cd42-497d-9253-d777ae39fafc
+# ╠═138adaf5-bc4c-4a3f-9704-64ae9105af08
+# ╠═2097d7a9-8712-4d0f-a01c-d2d64e9aa4c2
+# ╠═dc096da6-9f18-4e0b-aacc-ff2b72fdd255
+# ╠═3f8f2205-e93d-471e-9f06-0b1aa65100d9
+# ╠═de75bff5-896d-4d0d-be76-eaceb221aedb
+# ╠═d1235075-2e8d-439e-b84f-c98a641fa98b
+# ╠═47154a6e-75c0-401b-a541-6d60bc605aed
+# ╠═89cade4a-e9f6-4767-8dec-7d0fd8c9ebbf
+# ╠═3e34d4b1-45e8-4b7b-ab2f-ec2bbeacefba
+# ╠═f65afa49-6807-4ec3-ad1a-00d9db1140ea
+# ╠═f131c5ff-4c13-4ef4-bb68-02d6044127df
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
